@@ -17,7 +17,7 @@
  */
 
 metadata {
-	definition(name: "Z-Wave Mold Detector", namespace: "smartthings", author: "SmartThings", mnmn: "SmartThings", vid: "generic-mold", ocfDeviceType: "oic.d.thermostat") {
+	definition(name: "aerQ Sensor", namespace: "Aeotec", author: "Chris", mnmn: "SmartThings", vid: "aerq-custom", ocfDeviceType: "oic.d.thermostat") {
 		capability "Temperature Measurement"
 		capability "Relative Humidity Measurement"
 		capability "Dew Point"
@@ -25,13 +25,21 @@ metadata {
 		capability "Battery"
 		capability "Sensor"
 		capability "Health Check"
+		capability "Configuration"
+
+		attribute "updateNeeded", "string"
+		attribute "parameter1", "number"
+		attribute "parameter2", "number"
+		attribute "parameter3", "number"
+		attribute "parameter4", "number"
+		attribute "parameter64", "number"
 
 		// Aeotec Aerq Temperature and Humidity Sensor
-		fingerprint mfr:"0371", prod:"0002", model:"0009", deviceJoinName: "Aeotec Multipurpose Sensor", mnmn: "SmartThings", vid: "aeotec-temp-humidity" //EU 
+		fingerprint mfr:"0371", prod:"0002", model:"0009", deviceJoinName: "Aeotec Multipurpose Sensor", mnmn: "SmartThings", vid: "aeotec-temp-humidity" //EU
 		fingerprint mfr:"0371", prod:"0102", model:"0009", deviceJoinName: "Aeotec Multipurpose Sensor", mnmn: "SmartThings", vid: "aeotec-temp-humidity" //US
 		fingerprint mfr:"0371", prod:"0202", model:"0009", deviceJoinName: "Aeotec Multipurpose Sensor", mnmn: "SmartThings", vid: "aeotec-temp-humidity" //AU
 		// POPP Mold Detector
-		fingerprint mfr:"0154", prod:"0004", model:"0014", deviceJoinName: "POPP Multipurpose Sensor"	//EU 
+		fingerprint mfr:"0154", prod:"0004", model:"0014", deviceJoinName: "POPP Multipurpose Sensor"	//EU
 	}
 
 	tiles(scale: 2) {
@@ -65,11 +73,74 @@ metadata {
 		main "temperature", "humidity", "dewPoint"
 		details(["temperature", "humidity", "dewPoint", "battery"])
 	}
+	preferences {
+		section {
+			input(
+				title: "Threshold settings determine if there is sufficient change to temperature or humidity to send an unsolicited report. Operates at the same time as Periodic reports.",
+				type: "paragraph",
+				element: "paragraph"
+			)
+			input(
+				title: "Min temp change to report",
+				description: "Minimum change of temperature to cause an unsolicited report; checked on threshold interval (scale: .1°)",
+				name: "thresholdTemperatureValue",
+				type: "number",
+				range: "1..100",
+				defaultValue: 10
+			)
+			input(
+				title: "Min humidity change to report",
+				description: "Minimum change of humidity % to cause an unsolicited report; checked on threshold interval (scale: 1%)",
+				name: "thresholdHumidityValue",
+				type: "number",
+				range: "1..20",
+				defaultValue: 5
+			)
+			input(
+				title: "Threshold interval",
+				description: "Determines how often aerQ Sensor checks for minimum changes based on Parameter 1 and 2 or when the Sensor wakes up by button pressing (scale: minutes)",
+				name: "thresholdInterval",
+				type: "number",
+				range: "1..255",
+				defaultValue: 15
+			)
+			input(
+				title: "Periodic settings determine how often both temperature and humidity are reported. Operates at the same time as threshold reports.",
+				type: "paragraph",
+				element: "paragraph"
+			)
+			input(
+				title: "Periodic reports",
+				description: "Defines the time interval to send an unsolicited report (scale: seconds)",
+				name: "periodicReportValue",
+				type: "number",
+				range: "900..65535",
+				defaultValue: 43200
+			)
+			input(
+				title: "The Temperature Scale setting will take a manual wake up or two to set; the following temperature sensor reports will change the temperature unit and value appropriately.",
+				type: "paragraph",
+				element: "paragraph"
+			)
+			input(
+				title: "Temperature unit:",
+				description: "Sets the temperature unit to C or F (1 = Celsius, 2 = Fahrenheit)",
+				name: "temperatureScaleSetting",
+				type: "number",
+				range: "1..2",
+			)
+			input(
+				title: "PARAMETERS END - All configurations will take place after aerQ Sensor has been woken up. You can wait up to 12 hours or immediately wakeup aerQ by tapping its button.",
+				type: "paragraph",
+				element: "paragraph"
+			)
+		}
+	}
 }
 
 def installed() {
-	sendEvent(name: "checkInterval", value: 8 * 60 * 60 + 10 * 60, displayed: false, data: [protocol: "zwave", hubHardwareId: device.hub.hardwareID])
-	// device doesn't send it on inclusion by itslef, so event is needed to populate plugin
+	sendEvent(name: "checkInterval", value: 15 * 60, displayed: false, data: [protocol: "zwave", hubHardwareId: device.hub.hardwareID])
+	// device doesn't send it on inclusion by itself, so event is needed to populate plugin
 	sendEvent(name: "moldHealthConcern", value: "good", displayed: false)
 
 	def cmds = [
@@ -80,6 +151,12 @@ def installed() {
 		secure(zwave.wakeUpV2.wakeUpNoMoreInformation())
 	]
 
+	response(cmds)
+}
+
+def updated() {
+	def cmds = []
+	cmds << sendEvent(name: "updateNeeded", value: "true", displayed: false)
 	response(cmds)
 }
 
@@ -102,6 +179,55 @@ def parse(String description) {
 
 def zwaveEvent(physicalgraph.zwave.commands.wakeupv2.WakeUpIntervalReport cmd) {
 	log.debug "Wake Up Interval Report: ${cmd}"
+	def result = []
+
+	if (!state.lastbat || (new Date().time) - state.lastbat > 53 * 60 * 60 * 1000) {
+		result << response(secure(zwave.batteryV1.batteryGet()))
+	}
+
+	result << [createEvent(descriptionText: "${device.displayName} woke up", isStateChange: false)]
+	result << response(secure(zwave.wakeUpV1.wakeUpNoMoreInformation()))
+	result
+}
+
+def zwaveEvent(physicalgraph.zwave.commands.configurationv2.ConfigurationReport cmd) {
+	switch (cmd.parameterNumber) {
+		case 0x01:
+			state.parameter1 = cmd.scaledConfigurationValue
+			sendEvent(name: "parameter1", value: cmd.scaledConfigurationValue, displayed: false)
+			break
+		case 0x02:
+			state.parameter2 = cmd.scaledConfigurationValue
+			sendEvent(name: "parameter2", value: cmd.scaledConfigurationValue, displayed: false)
+			break
+		case 0x03:
+			state.parameter3 = cmd.scaledConfigurationValue
+			sendEvent(name: "parameter3", value: cmd.scaledConfigurationValue, displayed: false)
+			break
+		case 0x04:
+			state.parameter4 = cmd.scaledConfigurationValue
+			if(state.parameter4 < 0) {
+				state.parameter4 = state.parameter4 + 65536
+			}
+			sendEvent(name: "parameter4", value: state.parameter4, displayed: false)
+			break
+		case 0x40:
+			state.parameter64 = cmd.scaledConfigurationValue
+			sendEvent(name: "parameter64", value: state.parameter64, displayed: false)
+			break
+		default:
+			log.debug "Setting unknown parameter"
+			break
+	}
+
+	checkParameterValues()
+}
+
+def checkParameterValues() {
+	//if parameter settings fail somehow, wakeup can cause parameter settings to update again the next time. When all settings are true, then stop parameter updates the next time.
+	if (state.parameter1 == thresholdTemperatureValue && state.parameter2 == thresholdHumidityValue && state.parameter4 == periodicReportValue && state.parameter64 == temperatureScaleSetting) {
+		sendEvent(name: "updateNeeded", value: "false", displayed: false)
+	}
 }
 
 def zwaveEvent(physicalgraph.zwave.commands.notificationv3.NotificationReport cmd) {
@@ -186,6 +312,33 @@ def zwaveEvent(physicalgraph.zwave.commands.wakeupv2.WakeUpNotification cmd) {
 			"delay 2000"
 		]
 	}
+
+	cmds += secure(zwave.wakeUpV2.wakeUpIntervalSet(seconds:43200, nodeid:zwaveHubNodeId))
+	cmds += secure(zwave.wakeUpV2.wakeUpIntervalGet())
+
+	if (device.currentValue("updateNeeded") == "true") {
+		if (thresholdTemperatureValue != state.parameter1 && thresholdTemperatureValue) {
+			cmds += response(secure(zwave.configurationV1.configurationSet(parameterNumber: 1, size: 1, scaledConfigurationValue: thresholdTemperatureValue)))
+			cmds += response(secure(zwave.configurationV1.configurationGet(parameterNumber: 1)))
+		}
+		if (thresholdHumidityValue != state.parameter2 && thresholdHumidityValue) {
+			cmds += response(secure(zwave.configurationV1.configurationSet(parameterNumber: 2, size: 1, scaledConfigurationValue: thresholdHumidityValue)))
+			cmds += response(secure(zwave.configurationV1.configurationGet(parameterNumber: 2)))
+		}
+		if (thresholdHumidityValue != state.parameter3 && thresholdInterval) {
+			cmds += response(secure(zwave.configurationV1.configurationSet(parameterNumber: 3, size: 1, scaledConfigurationValue: thresholdInterval)))
+			cmds += response(secure(zwave.configurationV1.configurationGet(parameterNumber: 3)))
+		}
+		if (periodicReportValue != state.parameter4 && periodicReportValue) {
+			cmds += response(secure(zwave.configurationV1.configurationSet(parameterNumber: 4, size: 2, scaledConfigurationValue: periodicReportValue)))
+			cmds += response(secure(zwave.configurationV1.configurationGet(parameterNumber: 4)))
+		}
+		if (temperatureScaleSetting != state.parameter64 && temperatureScaleSetting) {
+			cmds += response(secure(zwave.configurationV1.configurationSet(parameterNumber: 64, size: 1, scaledConfigurationValue: temperatureScaleSetting)))
+			cmds += response(secure(zwave.configurationV1.configurationGet(parameterNumber: 64)))
+		}
+	}
+
 	cmds += secure(zwave.wakeUpV2.wakeUpNoMoreInformation())
 
 	[result, response(cmds)]
